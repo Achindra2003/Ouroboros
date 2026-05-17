@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ouroboros — Recursive Introspection Engine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#06080c;--surface:#0c0e14;--card:#12151e;--card2:#181c28;
+  --border:#1e2230;--border2:#2a2e40;
+  --text:#d0c8b8;--dim:#605848;--dim2:#48403a;
+  --accent:#e8c060;--accent2:rgba(232,192,96,.12);
+  --mood-cur:#68b8e8;--mood-anx:#e8a040;--mood-obs:#e86868;--mood-mel:#a068d8;--mood-ser:#68d8a8;--mood-ecu:#f8d048;
+  --research:#68b8e8;--steer:#e86868;
+  --font:'Georgia',serif;--mono:'SF Mono','Fira Code','Courier New',monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--font);overflow:hidden}
+button,input,textarea{font-family:var(--sans)}
+
+#app{height:100%;display:flex;flex-direction:column}
+
+#topbar{display:flex;align-items:center;gap:12px;padding:10px 20px;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0}
+.logo{font-size:1rem;font-weight:400;letter-spacing:5px;color:var(--accent);text-transform:uppercase}
+.logo-sub{font-size:.55rem;color:var(--dim);letter-spacing:1px;margin-left:8px;font-style:italic}
+.topbar-right{margin-left:auto;display:flex;gap:6px;align-items:center}
+.btn{padding:5px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--dim);font-size:.6rem;cursor:pointer;transition:all .2s;text-transform:uppercase;letter-spacing:1px;font-family:var(--mono)}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn.primary{border-color:var(--accent);color:var(--accent);background:var(--accent2)}
+.btn.primary:hover{background:rgba(232,192,96,.2)}
+.btn:disabled{opacity:.3;cursor:default}
+.btn.danger{border-color:#e86868;color:#e86868}
+
+#main{flex:1;display:flex;min-height:0}
+
+#sidebar{width:240px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--surface)}
+#sidebar-tabs{display:flex;border-bottom:1px solid var(--border)}
+.sidebar-tab{flex:1;padding:9px 0;text-align:center;font-family:var(--mono);font-size:.5rem;color:var(--dim);text-transform:uppercase;letter-spacing:1.5px;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s}
+.sidebar-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.sidebar-tab:hover{color:var(--text)}
+#sidebar-content{flex:1;overflow-y:auto;padding:10px}
+#sidebar-content::-webkit-scrollbar{width:3px}
+#sidebar-content::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+.mode-card{padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer;transition:all .2s;background:var(--card)}
+.mode-card:hover{border-color:var(--border2);background:var(--card2)}
+.mode-card.active{border-color:var(--accent);background:var(--accent2)}
+.mode-icon{font-size:1rem;margin-bottom:2px}
+.mode-label{font-family:var(--mono);font-size:.6rem;color:var(--text);text-transform:uppercase;letter-spacing:1px}
+.mode-desc{font-size:.65rem;color:var(--dim);margin-top:2px;line-height:1.35}
+
+.session-item{padding:7px 9px;border:1px solid var(--border);border-radius:6px;margin-bottom:5px;cursor:pointer;transition:all .2s;background:var(--card)}
+.session-item:hover{border-color:var(--border2)}
+.session-seed{font-size:.7rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.session-meta{font-family:var(--mono);font-size:.45rem;color:var(--dim);margin-top:3px;display:flex;gap:8px}
+
+#center{flex:1;display:flex;flex-direction:column;min-width:0}
+
+#input-area{padding:10px 16px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;background:var(--surface);flex-shrink:0}
+#seed-input{flex:1;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--font);font-size:.8rem;outline:none;transition:border-color .2s}
+#seed-input:focus{border-color:var(--accent)}
+#seed-input::placeholder{color:var(--dim2)}
+
+#steer-bar{padding:10px 16px;border-bottom:1px solid var(--accent);background:rgba(232,192,96,.05);display:none;gap:8px;align-items:center;flex-shrink:0}
+#steer-bar.show{display:flex}
+#steer-input{flex:1;padding:8px 12px;background:var(--card);border:1px solid var(--accent);border-radius:6px;color:var(--text);font-family:var(--font);font-size:.8rem;outline:none}
+#steer-input::placeholder{color:var(--dim)}
+
+#thoughts-area{flex:1;overflow-y:auto;padding:12px 16px;scroll-behavior:smooth}
+#thoughts-area::-webkit-scrollbar{width:4px}
+#thoughts-area::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+.thought{padding:8px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;animation:fadeSlide .4s ease-out;background:var(--card)}
+@keyframes fadeSlide{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.thought-header{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.thought-node{font-family:var(--mono);font-size:.45rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;padding:1px 5px;background:var(--surface);border-radius:3px}
+.thought-mood{width:5px;height:5px;border-radius:50%;margin-left:auto}
+.thought-text{font-size:.78rem;line-height:1.55;color:var(--text)}
+.thought.insight{border-color:rgba(232,192,96,.3);background:var(--accent2)}
+.thought.insight .thought-text{color:var(--accent);font-style:italic}
+.thought.insight .thought-node{color:var(--accent)}
+.thought.reflect .thought-text{color:var(--dim);font-size:.74rem}
+.thought.reading{border-left:2px solid var(--border2);background:var(--surface)}
+.thought.reading .thought-text{font-size:.68rem;color:var(--dim);line-height:1.45}
+.thought.research{border-color:rgba(104,184,232,.2);background:rgba(104,184,232,.05)}
+.thought.research .thought-node{color:var(--research)}
+.thought.steer{border-color:rgba(232,104,104,.2);background:rgba(232,104,104,.05)}
+.thought.steer .thought-node{color:var(--steer)}
+.thought.tool{border-left:2px solid var(--research);background:rgba(104,184,232,.03)}
+.thought.tool .thought-text{font-size:.68rem;color:var(--research);font-family:var(--mono)}
+
+#insights-panel{border-top:1px solid var(--border);background:var(--surface);max-height:160px;overflow-y:auto;flex-shrink:0;display:none}
+#insights-panel.show{display:block}
+#insights-header{padding:8px 16px 4px;font-family:var(--mono);font-size:.5rem;color:var(--accent);text-transform:uppercase;letter-spacing:2px;position:sticky;top:0;background:var(--surface)}
+.insight-item{padding:6px 16px;font-size:.75rem;color:var(--accent);font-style:italic;border-bottom:1px solid rgba(232,192,96,.06)}
+.insight-item::before{content:"◆ ";font-size:.45rem;vertical-align:middle}
+
+#statebar{display:flex;gap:16px;padding:6px 16px;border-top:1px solid var(--border);font-family:var(--mono);font-size:.45rem;color:var(--dim);align-items:center;background:var(--surface);flex-shrink:0;flex-wrap:wrap}
+.state-item{display:flex;align-items:center;gap:4px}
+.mood-dot{width:7px;height:7px;border-radius:50%;transition:background .4s}
+.energy-bar{width:45px;height:3px;background:var(--surface);border-radius:2px;overflow:hidden}
+.energy-fill{height:100%;background:var(--accent);border-radius:2px;transition:width .5s}
+#status{margin-left:auto;font-style:italic}
+#status.running{color:var(--accent);animation:pulse 2s ease-in-out infinite}
+#status.waiting{color:var(--steer);animation:pulse 1.5s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.6}50%{opacity:1}}
+
+#rightbar{width:280px;flex-shrink:0;border-left:1px solid var(--border);display:flex;flex-direction:column;background:var(--surface)}
+#graph-area{flex:1;padding:6px;min-height:0}
+#graph-svg{width:100%;height:100%}
+#readings-area{padding:8px 12px;border-top:1px solid var(--border);max-height:180px;overflow-y:auto}
+#readings-area::-webkit-scrollbar{width:3px}
+#readings-area::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.reading-block{margin-bottom:6px}
+.reading-label{font-family:var(--mono);font-size:.4rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:1px}
+.reading-value{font-size:.65rem;color:var(--text);line-height:1.35}
+
+.node-circle{fill:var(--surface);stroke:var(--border);stroke-width:1.5;transition:all .4s}
+.node-label{fill:var(--dim);font-family:var(--mono);font-size:7px;text-anchor:middle;transition:fill .4s}
+.edge-line{stroke:var(--border);stroke-width:1;fill:none;transition:stroke .4s}
+.edge-line.back{stroke-dasharray:4 3;opacity:.5}
+.node-circle.active{fill:var(--accent);stroke:var(--accent);stroke-width:2;filter:drop-shadow(0 0 6px rgba(232,192,96,.4))}
+.node-label.active{fill:var(--bg)}
+.edge-line.active{stroke:var(--accent);stroke-width:1.5}
+.edge-line.active.back{stroke-dasharray:none;opacity:1}
+.node-circle.research-active{fill:var(--research);stroke:var(--research);stroke-width:2;filter:drop-shadow(0 0 6px rgba(104,184,232,.4))}
+.node-circle.steer-active{fill:var(--steer);stroke:var(--steer);stroke-width:2;filter:drop-shadow(0 0 6px rgba(232,104,104,.4))}
+
+#settings-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center}
+#settings-modal.show{display:flex}
+#settings-inner{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;width:380px;max-height:80vh;overflow-y:auto}
+#settings-inner h2{font-family:var(--mono);font-size:.65rem;color:var(--accent);text-transform:uppercase;letter-spacing:2px;margin-bottom:14px}
+.setting-row{margin-bottom:10px}
+.setting-label{font-family:var(--mono);font-size:.5rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:3px;display:flex;justify-content:space-between}
+.setting-val{color:var(--text)}
+.setting-row input[type=range]{width:100%;accent-color:var(--accent);height:3px}
+.settings-actions{display:flex;gap:8px;margin-top:14px}
+
+#export-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center}
+#export-modal.show{display:flex}
+#export-inner{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;width:500px;max-height:80vh;overflow-y:auto}
+#export-inner h2{font-family:var(--mono);font-size:.65rem;color:var(--accent);text-transform:uppercase;letter-spacing:2px;margin-bottom:14px}
+#export-text{width:100%;min-height:250px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--mono);font-size:.65rem;padding:10px;resize:vertical;outline:none}
+.export-actions{display:flex;gap:8px;margin-top:10px}
+
+@media(max-width:1100px){#rightbar{display:none}}
+@media(max-width:800px){#sidebar{width:200px}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <span class="logo">Ouroboros</span>
+    <span class="logo-sub">recursive introspection engine</span>
+    <div class="topbar-right">
+      <button class="btn" onclick="toggleSettings()">Settings</button>
+      <button class="btn" onclick="toggleExport()">Export</button>
+    </div>
+  </div>
+  <div id="main">
+    <div id="sidebar">
+      <div id="sidebar-tabs">
+        <div class="sidebar-tab active" data-tab="modes" onclick="switchTab('modes')">Modes</div>
+        <div class="sidebar-tab" data-tab="history" onclick="switchTab('history')">History</div>
+      </div>
+      <div id="sidebar-content"></div>
+    </div>
+    <div id="center">
+      <div id="input-area">
+        <input id="seed-input" placeholder="Seed a thought..." value="What is consciousness?">
+        <button class="btn primary" id="btn-start" onclick="startRun()">Begin</button>
+        <button class="btn" id="btn-stop" onclick="stopRun()" style="display:none">Stop</button>
+        <button class="btn danger" onclick="resetRun()">Reset</button>
+      </div>
+      <div id="steer-bar">
+        <input id="steer-input" placeholder="Steer the introspection...">
+        <button class="btn primary" onclick="submitSteer()">Steer</button>
+        <button class="btn" onclick="skipSteer()">Skip</button>
+      </div>
+      <div id="thoughts-area"></div>
+      <div id="insights-panel">
+        <div id="insights-header">Surfaced Insights</div>
+        <div id="insights-list"></div>
+      </div>
+      <div id="statebar">
+        <div class="state-item"><div class="mood-dot" id="mood-dot"></div><span id="mood-label">curious</span></div>
+        <div class="state-item"><span>Energy</span><div class="energy-bar"><div class="energy-fill" id="energy-fill" style="width:80%"></div></div><span id="energy-label">80</span></div>
+        <div class="state-item"><span>Depth</span><span id="depth-label">0</span></div>
+        <div class="state-item"><span>Mem</span><span id="mem-label">0</span></div>
+        <div class="state-item"><span>Cycle</span><span id="cycle-label">0</span></div>
+        <div class="state-item"><span>Mode</span><span id="mode-label">explore</span></div>
+        <div id="status">idle</div>
+      </div>
+    </div>
+    <div id="rightbar">
+      <div id="graph-area">
+        <svg id="graph-svg" viewBox="0 0 280 520"></svg>
+      </div>
+      <div id="readings-area">
+        <div class="reading-block"><div class="reading-label">Emotional</div><div class="reading-value" id="rv-emo">—</div></div>
+        <div class="reading-block"><div class="reading-label">Logical</div><div class="reading-value" id="rv-log">—</div></div>
+        <div class="reading-block"><div class="reading-label">Memory</div><div class="reading-value" id="rv-mem">—</div></div>
+        <div class="reading-block"><div class="reading-label">Synthesis</div><div class="reading-value" id="rv-syn">—</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="settings-modal">
+  <div id="settings-inner">
+    <h2>Configuration</h2>
+    <div class="setting-row"><div class="setting-label">Max Depth <span class="setting-val" id="sv-depth">4</span></div><input type="range" min="1" max="10" value="4" id="sr-depth" oninput="updateSetting('depth',this.value)"></div>
+    <div class="setting-row"><div class="setting-label">Starting Energy <span class="setting-val" id="sv-energy">80</span></div><input type="range" min="20" max="100" value="80" step="5" id="sr-energy" oninput="updateSetting('energy',this.value)"></div>
+    <div class="setting-row"><div class="setting-label">Energy Drain <span class="setting-val" id="sv-drain">5</span></div><input type="range" min="1" max="20" value="5" id="sr-drain" oninput="updateSetting('drain',this.value)"></div>
+    <div class="setting-row"><div class="setting-label">Energy Recovery <span class="setting-val" id="sv-recovery">25</span></div><input type="range" min="5" max="50" value="25" step="5" id="sr-recovery" oninput="updateSetting('recovery',this.value)"></div>
+    <div class="setting-row"><div class="setting-label">Mood Shift <span class="setting-val" id="sv-moodchance">15%</span></div><input type="range" min="0" max="100" value="15" id="sr-moodchance" oninput="updateSetting('moodchance',this.value)"></div>
+    <div class="setting-row"><div class="setting-label">Steer Interval <span class="setting-val" id="sv-steerinterval">3</span></div><input type="range" min="1" max="10" value="3" id="sr-steerinterval" oninput="updateSetting('steerinterval',this.value)"></div>
+    <div class="setting-row"><div class="setting-label">Max Cycles <span class="setting-val" id="sv-maxcycles">15</span></div><input type="range" min="3" max="30" value="15" id="sr-maxcycles" oninput="updateSetting('maxcycles',this.value)"></div>
+    <div class="setting-row"><div class="setting-label">Max Memories <span class="setting-val" id="sv-memories">8</span></div><input type="range" min="2" max="20" value="8" id="sr-memories" oninput="updateSetting('memories',this.value)"></div>
+    <div class="settings-actions">
+      <button class="btn" onclick="resetSettings()">Reset</button>
+      <button class="btn primary" onclick="toggleSettings()">Done</button>
+    </div>
+  </div>
+</div>
+
+<div id="export-modal">
+  <div id="export-inner">
+    <h2>Export Session</h2>
+    <div style="display:flex;gap:6px;margin-bottom:10px">
+      <button class="btn primary" onclick="doExport('markdown')">Markdown</button>
+      <button class="btn" onclick="doExport('json')">JSON</button>
+      <button class="btn" onclick="copyExport()">Copy</button>
+    </div>
+    <textarea id="export-text" readonly></textarea>
+    <div class="export-actions"><button class="btn primary" onclick="toggleExport()">Close</button></div>
+  </div>
+</div>
+
+<script>
+(function(){
+const SVG_NS="http://www.w3.org/2000/svg";
+const NODES={
+  ingest:{x:140,y:22,label:"Ingest"},think:{x:140,y:75,label:"Think"},
+  reflect:{x:140,y:132,label:"Reflect"},
+  emotional:{x:38,y:210,label:"Feel"},logical:{x:140,y:210,label:"Examine"},memory:{x:242,y:210,label:"Recall"},
+  synthesize:{x:140,y:290,label:"Synthesize"},
+  research_agent:{x:38,y:365,label:"Research"},execute_tool:{x:140,y:365,label:"Tools"},
+  surface:{x:242,y:365,label:"Surface"},remember:{x:242,y:425,label:"Remember"},
+  breathe:{x:242,y:478,label:"Breathe"},steer:{x:38,y:478,label:"Steer"},
+};
+const EDGES=[
+  ["ingest","think",false],["think","reflect",false],
+  ["reflect","emotional",false],["reflect","logical",false],["reflect","memory",false],
+  ["emotional","synthesize",false],["logical","synthesize",false],["memory","synthesize",false],
+  ["synthesize","think",true],["synthesize","research_agent",false],["synthesize","surface",false],
+  ["research_agent","execute_tool",false],["execute_tool","research_agent",true],
+  ["research_agent","think",true],
+  ["surface","remember",false],["remember","breathe",false],
+  ["breathe","think",true],["breathe","steer",false],["breathe","__end__",true],
+  ["steer","think",true],
+];
+const MOOD_COLORS={curious:"#68b8e8",anxious:"#e8a040",obsessed:"#e86868",melancholic:"#a068d8",serene:"#68d8a8",ecstatic:"#f8d048"};
+
+let ws=null,prevNode=null,stream=[],currentMode="explore",sessionId=null,insights=[];
+let modesData=[],sessionsData=[],waitingForInput=false;
+let settings={max_depth:4,starting_energy:80,energy_drain_think:5,energy_recovery_breathe:25,mood_shift_chance:.15,max_loop_guard:15,max_memories:8,steer_interval:3};
+let defaultSettings={...settings};
+let currentTab="modes",currentMood="curious";
+
+function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML}
+function svgEl(tag,attrs){const e=document.createElementNS(SVG_NS,tag);for(const[k,v]of Object.entries(attrs))e.setAttribute(k,v);return e}
+
+function buildGraph(){
+  const svg=document.getElementById("graph-svg");svg.innerHTML="";
+  const defs=svgEl("defs",{});const filter=svgEl("filter",{id:"glow"});
+  filter.appendChild(svgEl("feGaussianBlur",{stdDeviation:"2",result:"blur"}));
+  const merge=svgEl("feMerge",{});merge.appendChild(svgEl("feMergeNode",{"in":"blur"}));merge.appendChild(svgEl("feMergeNode",{"in":"SourceGraphic"}));
+  filter.appendChild(merge);defs.appendChild(filter);svg.appendChild(defs);
+  EDGES.forEach(([from,to,isBack])=>{
+    const a=NODES[from],b=NODES[to];if(!a||!b)return;let d;
+    if(isBack){const ox=(from==="synthesize"&&to==="think")?-60:(from==="breathe"&&to==="think")?-60:60;d=`M${a.x},${a.y} Q${a.x+ox},${(a.y+b.y)/2} ${b.x},${b.y}`}
+    else{d=`M${a.x},${a.y} L${b.x},${b.y}`}
+    svg.appendChild(svgEl("path",{d,class:"edge-line"+(isBack?" back":""),"data-from":from,"data-to":to}));
+  });
+  Object.entries(NODES).forEach(([id,{x,y,label}])=>{
+    const g=svgEl("g",{});
+    g.appendChild(svgEl("circle",{cx:x,cy:y,r:14,class:"node-circle","data-id":id,filter:"url(#glow)"}));
+    const t=svgEl("text",{x,y:y+2.5,class:"node-label","data-id":id});t.textContent=label;
+    g.appendChild(t);svg.appendChild(g);
+  });
+}
+
+function setActive(nodeName){
+  document.querySelectorAll(".node-circle").forEach(c=>{c.classList.remove("active","research-active","steer-active")});
+  document.querySelectorAll(".node-label").forEach(l=>l.classList.remove("active"));
+  document.querySelectorAll(".edge-line").forEach(e=>e.classList.remove("active"));
+  const circle=document.querySelector(`.node-circle[data-id="${nodeName}"]`);
+  const label=document.querySelector(`.node-label[data-id="${nodeName}"]`);
+  if(!circle)return;
+  const cls=["research_agent","execute_tool"].includes(nodeName)?"research-active":nodeName==="steer"?"steer-active":"active";
+  circle.classList.add(cls);if(label)label.classList.add("active");
+  if(prevNode){document.querySelectorAll(`.edge-line[data-from="${prevNode}"][data-to="${nodeName}"]`).forEach(e=>e.classList.add("active"))}
+  prevNode=nodeName;
+}
+
+function addThought(node,text){
+  const el=document.createElement("div");
+  const isInsight=node==="surface";const isReflect=node==="reflect"||node==="logical";
+  const isReading=["emotional","memory","synthesize"].includes(node);
+  const isResearch=["research_agent","plan_research"].includes(node);
+  const isTool=node==="execute_tool";const isSteer=node==="steer";
+  let cls="thought";
+  if(isInsight)cls+=" insight";else if(isReflect)cls+=" reflect";else if(isReading)cls+=" reading";
+  else if(isResearch)cls+=" research";else if(isTool)cls+=" tool";else if(isSteer)cls+=" steer";
+  el.className=cls;
+  const mc=MOOD_COLORS[currentMood||"curious"];
+  const moodDot=mc?`<div class="thought-mood" style="background:${mc}"></div>`:"";
+  el.innerHTML=`<div class="thought-header"><span class="thought-node">${esc(node)}</span>${moodDot}</div><div class="thought-text">${esc(text)}</div>`;
+  document.getElementById("thoughts-area").appendChild(el);el.scrollIntoView({behavior:"smooth",block:"end"});
+}
+
+function updateState(data){
+  currentMood=data.mood||"curious";currentMode=data.mode||currentMode;
+  document.getElementById("mood-dot").style.background=MOOD_COLORS[data.mood]||"#888";
+  document.getElementById("mood-label").textContent=data.mood||"curious";
+  document.getElementById("energy-fill").style.width=Math.max(0,data.energy||0)+"%";
+  document.getElementById("energy-label").textContent=Math.round(data.energy||80);
+  document.getElementById("depth-label").textContent=data.depth||0;
+  document.getElementById("mem-label").textContent=(data.memories||[]).length;
+  document.getElementById("cycle-label").textContent=data.loop_guard||0;
+  document.getElementById("mode-label").textContent=currentMode;
+  if(data.emotional_reading)document.getElementById("rv-emo").textContent=data.emotional_reading;
+  if(data.logical_reading)document.getElementById("rv-log").textContent=data.logical_reading;
+  if(data.memory_reading)document.getElementById("rv-mem").textContent=data.memory_reading;
+  if(data.synthesis)document.getElementById("rv-syn").textContent=data.synthesis;
+  if(data.insights&&data.insights.length){insights=data.insights;renderInsights()}
+  if(data.waiting_for_input){waitingForInput=true;document.getElementById("steer-bar").classList.add("show");document.getElementById("status").textContent="waiting for input";document.getElementById("status").className="waiting";document.getElementById("btn-start").style.display="";document.getElementById("btn-stop").style.display="none";document.getElementById("btn-start").disabled=false}
+  else{waitingForInput=false;document.getElementById("steer-bar").classList.remove("show")}
+  if(data.running&&!waitingForInput){document.getElementById("status").textContent="thinking...";document.getElementById("status").className="running";document.getElementById("btn-start").style.display="none";document.getElementById("btn-stop").style.display="";document.getElementById("btn-start").disabled=true}
+  else if(!data.running&&!waitingForInput){document.getElementById("status").textContent=stream.length?"complete":"idle";document.getElementById("status").className="";document.getElementById("btn-start").style.display="";document.getElementById("btn-stop").style.display="none";document.getElementById("btn-start").disabled=false}
+}
+
+function renderInsights(){
+  const panel=document.getElementById("insights-panel");const list=document.getElementById("insights-list");
+  if(insights.length)panel.classList.add("show");else panel.classList.remove("show");
+  list.innerHTML=insights.map(i=>`<div class="insight-item">${esc(i)}</div>`).join("");
+}
+
+async function fetchModes(){try{const r=await fetch("/api/modes");modesData=await r.json();renderModes()}catch(e){}}
+function renderModes(){
+  const el=document.getElementById("sidebar-content");if(currentTab!=="modes")return;
+  el.innerHTML=modesData.map(m=>`<div class="mode-card${m.mode===currentMode?" active":""}" onclick="selectMode('${m.mode}')"><div class="mode-icon">${m.icon}</div><div class="mode-label">${m.label}</div><div class="mode-desc">${m.description}</div></div>`).join("");
+}
+window.selectMode=function(mode){currentMode=mode;const preset=modesData.find(m=>m.mode===mode);if(preset){Object.assign(settings,preset.config);syncSettingsUI()}renderModes()};
+
+async function fetchSessions(){try{const r=await fetch("/api/sessions");sessionsData=await r.json();renderSessions()}catch(e){}}
+function renderSessions(){
+  const el=document.getElementById("sidebar-content");if(currentTab!=="history")return;
+  if(!sessionsData.length){el.innerHTML='<div style="color:var(--dim);font-size:.7rem;text-align:center;padding:16px">No sessions yet</div>';return}
+  el.innerHTML=sessionsData.map(s=>`<div class="session-item" onclick="loadSession('${s.id}')"><div class="session-seed">${esc(s.seed)}</div><div class="session-meta"><span>${s.mode}</span><span>${s.insight_count} insights</span>${s.live?'<span style="color:var(--accent)">live</span>':''}</div></div>`).join("");
+}
+
+window.switchTab=function(tab){currentTab=tab;document.querySelectorAll(".sidebar-tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===tab));if(tab==="modes")renderModes();else fetchSessions()};
+
+window.loadSession=async function(id){
+  try{const r=await fetch(`/api/sessions/${id}`);const data=await r.json();
+  sessionId=id;stream=data.stream||[];insights=data.insights||[];currentMode=data.mode||"explore";
+  document.getElementById("thoughts-area").innerHTML="";
+  stream.forEach(s=>addThought(s.node,s.text));renderInsights();
+  updateState({...data.state,running:false,insights,waiting_for_input:false});
+  if(data.config){settings.max_depth=data.config.max_depth||4;settings.starting_energy=data.config.starting_energy||80;settings.energy_drain_think=data.config.energy_drain_think||5;settings.energy_recovery_breathe=data.config.energy_recovery_breathe||25;settings.mood_shift_chance=data.config.mood_shift_chance||.15;settings.steer_interval=data.config.steer_interval||3;settings.max_loop_guard=data.config.max_loop_guard||15;settings.max_memories=data.config.max_memories||8;syncSettingsUI()}
+  }catch(e){console.error(e)}
+};
+
+function connectWS(){
+  ws=new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage=function(ev){
+    const data=JSON.parse(ev.data);
+    if(data.type==="step"){
+      sessionId=data.session_id;
+      if(data.stream&&data.stream.length>stream.length){data.stream.slice(stream.length).forEach(s=>addThought(s.node,s.text));stream=data.stream}
+      updateState(data);if(data.node)setActive(data.node);
+    }else if(data.type==="waiting_for_input"){
+      updateState({running:false,waiting_for_input:true,..._lastState});
+      setActive("steer");
+    }else if(data.type==="complete"){updateState({...data,running:false,waiting_for_input:false});fetchSessions()}
+    else if(data.type==="error"){document.getElementById("status").textContent="error";document.getElementById("status").className=""}
+  };
+  ws.onclose=function(){setTimeout(connectWS,3000)};
+}
+let _lastState={};
+
+window.startRun=async function(){
+  const seed=document.getElementById("seed-input").value.trim()||"What am I?";
+  document.getElementById("thoughts-area").innerHTML="";stream=[];insights=[];prevNode=null;
+  renderInsights();
+  if(ws&&ws.readyState===1){ws.send(JSON.stringify({action:"start",seed,mode:currentMode,config:settings}))}
+  else{try{const params=new URLSearchParams({seed,mode:currentMode});const r=await fetch("/api/start?"+params.toString(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(settings)});const d=await r.json();if(d.session_id)sessionId=d.session_id}catch(e){}}
+};
+
+window.stopRun=async function(){
+  if(sessionId){
+    if(ws&&ws.readyState===1)ws.send(JSON.stringify({action:"stop",session_id:sessionId}));
+    else await fetch(`/api/stop/${sessionId}`,{method:"POST"});
+  }
+};
+
+window.resetRun=async function(){
+  if(ws&&ws.readyState===1)ws.send(JSON.stringify({action:"reset"}));
+  else await fetch("/api/reset",{method:"POST"});
+  document.getElementById("thoughts-area").innerHTML="";stream=[];insights=[];prevNode=null;sessionId=null;
+  renderInsights();
+  document.querySelectorAll(".node-circle").forEach(c=>{c.classList.remove("active","research-active","steer-active")});
+  document.querySelectorAll(".node-label").forEach(l=>l.classList.remove("active"));
+  document.querySelectorAll(".edge-line").forEach(e=>e.classList.remove("active"));
+  updateState({mood:"curious",energy:settings.starting_energy,depth:0,memories:[],loop_guard:0,running:false,insights:[],waiting_for_input:false});
+};
+
+window.submitSteer=async function(){
+  const input=document.getElementById("steer-input").value.trim()||"Continue exploring.";
+  document.getElementById("steer-input").value="";
+  if(ws&&ws.readyState===1)ws.send(JSON.stringify({action:"steer",session_id:sessionId,input}));
+  else await fetch(`/api/steer/${sessionId}?human_input=${encodeURIComponent(input)}`,{method:"POST"});
+  document.getElementById("steer-bar").classList.remove("show");waitingForInput=false;
+  addThought("steer",input);
+};
+
+window.skipSteer=async function(){
+  document.getElementById("steer-input").value="";
+  if(ws&&ws.readyState===1)ws.send(JSON.stringify({action:"steer",session_id:sessionId,input:"Continue."}));
+  else await fetch(`/api/steer/${sessionId}?human_input=Continue.`,{method:"POST"});
+  document.getElementById("steer-bar").classList.remove("show");waitingForInput=false;
+};
+
+document.getElementById("steer-input").addEventListener("keydown",e=>{if(e.key==="Enter")window.submitSteer()});
+
+window.toggleSettings=function(){document.getElementById("settings-modal").classList.toggle("show")};
+window.toggleExport=function(){document.getElementById("export-modal").classList.toggle("show")};
+
+window.updateSetting=function(key,val){
+  const map={depth:"max_depth",energy:"starting_energy",drain:"energy_drain_think",recovery:"energy_recovery_breathe",moodchance:"mood_shift_chance",steerinterval:"steer_interval",maxcycles:"max_loop_guard",memories:"max_memories"};
+  const k=map[key];
+  if(key==="moodchance"){settings[k]=val/100;document.getElementById("sv-"+key).textContent=val+"%"}
+  else{settings[k]=parseInt(val);document.getElementById("sv-"+key).textContent=val}
+};
+
+window.resetSettings=function(){Object.assign(settings,defaultSettings);syncSettingsUI()};
+
+function syncSettingsUI(){
+  document.getElementById("sr-depth").value=settings.max_depth;document.getElementById("sv-depth").textContent=settings.max_depth;
+  document.getElementById("sr-energy").value=settings.starting_energy;document.getElementById("sv-energy").textContent=settings.starting_energy;
+  document.getElementById("sr-drain").value=settings.energy_drain_think;document.getElementById("sv-drain").textContent=settings.energy_drain_think;
+  document.getElementById("sr-recovery").value=settings.energy_recovery_breathe;document.getElementById("sv-recovery").textContent=settings.energy_recovery_breathe;
+  document.getElementById("sr-moodchance").value=Math.round(settings.mood_shift_chance*100);document.getElementById("sv-moodchance").textContent=Math.round(settings.mood_shift_chance*100)+"%";
+  document.getElementById("sr-steerinterval").value=settings.steer_interval;document.getElementById("sv-steerinterval").textContent=settings.steer_interval;
+  document.getElementById("sr-maxcycles").value=settings.max_loop_guard;document.getElementById("sv-maxcycles").textContent=settings.max_loop_guard;
+  document.getElementById("sr-memories").value=settings.max_memories;document.getElementById("sv-memories").textContent=settings.max_memories;
+}
+
+window.doExport=async function(fmt){
+  if(!sessionId){document.getElementById("export-text").value="No session to export";return}
+  try{const r=await fetch(`/api/sessions/${sessionId}/export?format=${fmt}`);const data=await r.json();document.getElementById("export-text").value=fmt==="markdown"?data.markdown:JSON.stringify(data,null,2)}catch(e){document.getElementById("export-text").value="Export failed"}
+};
+
+window.copyExport=function(){const t=document.getElementById("export-text");t.select();navigator.clipboard.writeText(t.value)};
+
+document.getElementById("seed-input").addEventListener("keydown",e=>{if(e.key==="Enter")window.startRun()});
+
+buildGraph();fetchModes();fetchSessions();connectWS();
+})();
+</script>
+</body>
+</html>
