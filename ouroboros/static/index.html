@@ -89,6 +89,9 @@ button,input,textarea{font-family:var(--sans)}
 .thought.steer .thought-node{color:var(--steer)}
 .thought.tool{border-left:2px solid var(--research);background:rgba(104,184,232,.03)}
 .thought.tool .thought-text{font-size:.68rem;color:var(--research);font-family:var(--mono)}
+.thought.streaming .thought-text::after{content:"▋";color:var(--accent);margin-left:1px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+.reading-value[data-streaming]{color:var(--accent)}
 
 #insights-panel{border-top:1px solid var(--border);background:var(--surface);max-height:160px;overflow-y:auto;flex-shrink:0;display:none}
 #insights-panel.show{display:block}
@@ -246,7 +249,7 @@ const NODES={
   reflect:{x:140,y:132,label:"Reflect"},
   emotional:{x:38,y:210,label:"Feel"},logical:{x:140,y:210,label:"Examine"},memory:{x:242,y:210,label:"Recall"},
   synthesize:{x:140,y:290,label:"Synthesize"},
-  research_agent:{x:38,y:365,label:"Research"},execute_tool:{x:140,y:365,label:"Tools"},
+  plan_research:{x:38,y:365,label:"Plan"},research_worker:{x:140,y:365,label:"Search"},
   surface:{x:242,y:365,label:"Surface"},remember:{x:242,y:425,label:"Remember"},
   breathe:{x:242,y:478,label:"Breathe"},steer:{x:38,y:478,label:"Steer"},
 };
@@ -254,9 +257,8 @@ const EDGES=[
   ["ingest","think",false],["think","reflect",false],
   ["reflect","emotional",false],["reflect","logical",false],["reflect","memory",false],
   ["emotional","synthesize",false],["logical","synthesize",false],["memory","synthesize",false],
-  ["synthesize","think",true],["synthesize","research_agent",false],["synthesize","surface",false],
-  ["research_agent","execute_tool",false],["execute_tool","research_agent",true],
-  ["research_agent","think",true],
+  ["synthesize","think",true],["synthesize","plan_research",false],["synthesize","surface",false],
+  ["plan_research","research_worker",false],["research_worker","think",true],
   ["surface","remember",false],["remember","breathe",false],
   ["breathe","think",true],["breathe","steer",false],["breathe","__end__",true],
   ["steer","think",true],
@@ -299,27 +301,60 @@ function setActive(nodeName){
   const circle=document.querySelector(`.node-circle[data-id="${nodeName}"]`);
   const label=document.querySelector(`.node-label[data-id="${nodeName}"]`);
   if(!circle)return;
-  const cls=["research_agent","execute_tool"].includes(nodeName)?"research-active":nodeName==="steer"?"steer-active":"active";
+  const cls=["plan_research","research_worker"].includes(nodeName)?"research-active":nodeName==="steer"?"steer-active":"active";
   circle.classList.add(cls);if(label)label.classList.add("active");
   if(prevNode){document.querySelectorAll(`.edge-line[data-from="${prevNode}"][data-to="${nodeName}"]`).forEach(e=>e.classList.add("active"))}
   prevNode=nodeName;
 }
 
-function addThought(node,text){
-  const el=document.createElement("div");
+// Nodes whose live tokens update the readings panel rather than a thought bubble.
+const READING_NODES={emotional:"rv-emo",logical:"rv-log",synthesize:"rv-syn"};
+// Nodes that produce a streamed thought bubble.
+const BUBBLE_NODES=new Set(["think","reflect","surface","research_agent","plan_research","research_worker"]);
+let liveByNode={};
+
+function thoughtClass(node){
   const isInsight=node==="surface";const isReflect=node==="reflect"||node==="logical";
   const isReading=["emotional","memory","synthesize"].includes(node);
-  const isResearch=["research_agent","plan_research"].includes(node);
+  const isResearch=["research_agent","plan_research","research_worker"].includes(node);
   const isTool=node==="execute_tool";const isSteer=node==="steer";
   let cls="thought";
   if(isInsight)cls+=" insight";else if(isReflect)cls+=" reflect";else if(isReading)cls+=" reading";
   else if(isResearch)cls+=" research";else if(isTool)cls+=" tool";else if(isSteer)cls+=" steer";
-  el.className=cls;
+  return cls;
+}
+function makeBubble(node){
+  const el=document.createElement("div");el.className=thoughtClass(node);
   const mc=MOOD_COLORS[currentMood||"curious"];
   const moodDot=mc?`<div class="thought-mood" style="background:${mc}"></div>`:"";
-  el.innerHTML=`<div class="thought-header"><span class="thought-node">${esc(node)}</span>${moodDot}</div><div class="thought-text">${esc(text)}</div>`;
-  document.getElementById("thoughts-area").appendChild(el);el.scrollIntoView({behavior:"smooth",block:"end"});
+  el.innerHTML=`<div class="thought-header"><span class="thought-node">${esc(node)}</span>${moodDot}</div><div class="thought-text"></div>`;
+  document.getElementById("thoughts-area").appendChild(el);
+  return el;
 }
+function addThought(node,text){
+  const el=makeBubble(node);el.querySelector(".thought-text").textContent=text;
+  el.scrollIntoView({behavior:"smooth",block:"end"});
+}
+// Token-by-token streaming: build a thought bubble (or readings entry) as the model emits.
+function onToken(node,text){
+  if(READING_NODES[node]){
+    const rv=document.getElementById(READING_NODES[node]);
+    if(rv){if(!rv.dataset.streaming){rv.textContent="";rv.dataset.streaming="1"}rv.textContent+=text}
+    return;
+  }
+  if(!BUBBLE_NODES.has(node))return;
+  if(!liveByNode[node]){const el=makeBubble(node);el.classList.add("streaming");liveByNode[node]={el,text:""}}
+  const e=liveByNode[node];e.text+=text;
+  e.el.querySelector(".thought-text").textContent=e.text;
+  e.el.scrollIntoView({behavior:"smooth",block:"end"});
+}
+function finalizeLive(node,text){
+  const e=liveByNode[node];if(!e)return false;
+  e.el.classList.remove("streaming");
+  if(text)e.el.querySelector(".thought-text").textContent=text;
+  delete liveByNode[node];return true;
+}
+function finalizeAllLive(){Object.keys(liveByNode).forEach(n=>finalizeLive(n))}
 
 function updateState(data){
   currentMood=data.mood||"curious";currentMode=data.mode||currentMode;
@@ -331,10 +366,11 @@ function updateState(data){
   document.getElementById("mem-label").textContent=(data.memories||[]).length;
   document.getElementById("cycle-label").textContent=data.loop_guard||0;
   document.getElementById("mode-label").textContent=currentMode;
-  if(data.emotional_reading)document.getElementById("rv-emo").textContent=data.emotional_reading;
-  if(data.logical_reading)document.getElementById("rv-log").textContent=data.logical_reading;
-  if(data.memory_reading)document.getElementById("rv-mem").textContent=data.memory_reading;
-  if(data.synthesis)document.getElementById("rv-syn").textContent=data.synthesis;
+  const setReading=(id,val)=>{if(!val)return;const e=document.getElementById(id);e.textContent=val;delete e.dataset.streaming};
+  setReading("rv-emo",data.emotional_reading);
+  setReading("rv-log",data.logical_reading);
+  setReading("rv-mem",data.memory_reading);
+  setReading("rv-syn",data.synthesis);
   if(data.insights&&data.insights.length){insights=data.insights;renderInsights()}
   if(data.waiting_for_input){waitingForInput=true;document.getElementById("steer-bar").classList.add("show");document.getElementById("status").textContent="waiting for input";document.getElementById("status").className="waiting";document.getElementById("btn-start").style.display="";document.getElementById("btn-stop").style.display="none";document.getElementById("btn-start").disabled=false}
   else{waitingForInput=false;document.getElementById("steer-bar").classList.remove("show")}
@@ -378,15 +414,20 @@ function connectWS(){
   ws=new WebSocket(`ws://${location.host}/ws`);
   ws.onmessage=function(ev){
     const data=JSON.parse(ev.data);
-    if(data.type==="step"){
+    if(data.type==="token"){
+      onToken(data.node,data.text);
+    }else if(data.type==="step"){
       sessionId=data.session_id;
-      if(data.stream&&data.stream.length>stream.length){data.stream.slice(stream.length).forEach(s=>addThought(s.node,s.text));stream=data.stream}
+      if(data.stream&&data.stream.length>stream.length){
+        data.stream.slice(stream.length).forEach(s=>{if(!finalizeLive(s.node,s.text))addThought(s.node,s.text)});
+        stream=data.stream;
+      }
       updateState(data);if(data.node)setActive(data.node);
     }else if(data.type==="waiting_for_input"){
       updateState({running:false,waiting_for_input:true,..._lastState});
       setActive("steer");
-    }else if(data.type==="complete"){updateState({...data,running:false,waiting_for_input:false});fetchSessions()}
-    else if(data.type==="error"){document.getElementById("status").textContent="error";document.getElementById("status").className=""}
+    }else if(data.type==="complete"){finalizeAllLive();updateState({...data,running:false,waiting_for_input:false});fetchSessions()}
+    else if(data.type==="error"){finalizeAllLive();document.getElementById("status").textContent="error";document.getElementById("status").className=""}
   };
   ws.onclose=function(){setTimeout(connectWS,3000)};
 }
@@ -394,7 +435,7 @@ let _lastState={};
 
 window.startRun=async function(){
   const seed=document.getElementById("seed-input").value.trim()||"What am I?";
-  document.getElementById("thoughts-area").innerHTML="";stream=[];insights=[];prevNode=null;
+  document.getElementById("thoughts-area").innerHTML="";stream=[];insights=[];prevNode=null;liveByNode={};
   renderInsights();
   if(ws&&ws.readyState===1){ws.send(JSON.stringify({action:"start",seed,mode:currentMode,config:settings}))}
   else{try{const params=new URLSearchParams({seed,mode:currentMode});const r=await fetch("/api/start?"+params.toString(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(settings)});const d=await r.json();if(d.session_id)sessionId=d.session_id}catch(e){}}
@@ -410,7 +451,7 @@ window.stopRun=async function(){
 window.resetRun=async function(){
   if(ws&&ws.readyState===1)ws.send(JSON.stringify({action:"reset"}));
   else await fetch("/api/reset",{method:"POST"});
-  document.getElementById("thoughts-area").innerHTML="";stream=[];insights=[];prevNode=null;sessionId=null;
+  document.getElementById("thoughts-area").innerHTML="";stream=[];insights=[];prevNode=null;sessionId=null;liveByNode={};
   renderInsights();
   document.querySelectorAll(".node-circle").forEach(c=>{c.classList.remove("active","research-active","steer-active")});
   document.querySelectorAll(".node-label").forEach(l=>l.classList.remove("active"));

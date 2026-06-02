@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage
 from langchain_core.language_models import BaseChatModel
 
 from ouroboros.graph.state import OuroborosState
@@ -39,6 +39,12 @@ FALLBACK_INSIGHTS = [
     "The rumination reveals: the question was never the point.",
     "What I found: the act of looking is itself the discovery.",
     "The loop closes. What was sought was the seeker all along.",
+]
+
+FALLBACK_RESEARCH = [
+    "The search turns up nothing the mind did not already hold. Inward, then.",
+    "No external answer arrives. The thought must do its own work.",
+    "Research falls silent; the question returns, unaltered, to the thinker.",
 ]
 
 MOOD_KEYWORDS = {
@@ -134,22 +140,41 @@ def make_reflect(llm: BaseChatModel, config: OuroborosConfig):
     return reflect
 
 
-def emotional_analysis(state: OuroborosState, config: OuroborosConfig = None) -> dict:
-    if config is None:
-        config = OuroborosConfig()
-    thought = state.get("thought", "")
-    mood = state.get("mood", "curious")
+def derive_mood(thought: str, current_mood: str, config: OuroborosConfig) -> str:
+    """Derive the next mood from the thought's content.
+
+    Keyword detection acts as a cheap, deterministic prior; absent a match, the
+    mood may stochastically shift. Routing and the breathe node depend on these
+    transitions, so this stays a pure, fast function (no LLM).
+    """
     thought_lower = thought.lower()
-    new_mood = mood
     for candidate, words in MOOD_KEYWORDS.items():
         if any(w in thought_lower for w in words):
-            new_mood = candidate
-            break
-    else:
-        if random.random() < config.mood_shift_chance:
-            new_mood = random.choice(MOOD_SHIFTS.get(mood, ["curious"]))
-    reading = f"Emotional undertone: {new_mood}. {MOOD_READINGS.get(new_mood, '')}"
-    return {"mood": new_mood, "emotional_reading": reading}
+            return candidate
+    if random.random() < config.mood_shift_chance:
+        return random.choice(MOOD_SHIFTS.get(current_mood, ["curious"]))
+    return current_mood
+
+
+def make_emotional_analysis(llm: BaseChatModel, config: OuroborosConfig):
+    async def emotional_analysis(state: OuroborosState) -> dict:
+        thought = state.get("thought", "")
+        new_mood = derive_mood(thought, state.get("mood", "curious"), config)
+        prompt = (
+            f'A mind in a "{new_mood}" state is examining this thought:\n'
+            f'"{thought}"\n\n'
+            "Speak from the emotional/affective perspective ONLY (not logic). "
+            "What feeling underlies this thought? What is it avoiding, or yearning "
+            "toward? One or two sentences."
+        )
+        try:
+            resp = await llm.ainvoke([{"role": "system", "content": prompt}])
+            reading = resp.content.strip()
+        except Exception:
+            reading = f"Emotional undertone: {new_mood}. {MOOD_READINGS.get(new_mood, '')}"
+        return {"mood": new_mood, "emotional_reading": reading}
+
+    return emotional_analysis
 
 
 def make_logical_analysis(llm: BaseChatModel):
@@ -170,28 +195,44 @@ def make_logical_analysis(llm: BaseChatModel):
 
 
 def memory_search(state: OuroborosState) -> dict:
+    from ouroboros.memory import semantic_search
+
     thought = state.get("thought", "")
     mems = state.get("memories", [])
-    thought_words = set(thought.lower().split())
-    related = [m for m in mems if len(thought_words & set(m.lower().split())) > 1]
-    if not related and mems:
-        related = mems[-2:]
-    reading = (
-        ("Connected memories: " + "; ".join(related[-3:]))
-        if related
-        else "No connected memories. The thought is unanchored."
-    )
+    if not mems:
+        return {"memory_reading": "No connected memories. The thought is unanchored."}
+    results = semantic_search(thought, mems, k=3)
+    related = [m for m, score in results if score > 0] or mems[-2:]
+    reading = "Connected memories: " + "; ".join(related)
     return {"memory_reading": reading}
 
 
-def synthesize(state: OuroborosState) -> dict:
-    emo = state.get("emotional_reading", "")
-    logic = state.get("logical_reading", "")
-    mem = state.get("memory_reading", "")
-    return {
-        "synthesis": f"{emo} {logic} {mem}",
-        "depth": state.get("depth", 0) + 1,
-    }
+def make_synthesize(llm: BaseChatModel):
+    async def synthesize(state: OuroborosState) -> dict:
+        emo = state.get("emotional_reading", "")
+        logic = state.get("logical_reading", "")
+        mem = state.get("memory_reading", "")
+        thought = state.get("thought", "")
+        prompt = (
+            f'Three perspectives have examined the thought:\n"{thought}"\n\n'
+            f"- Emotional: {emo}\n"
+            f"- Logical: {logic}\n"
+            f"- Memory: {mem}\n\n"
+            "Integrate these perspectives into one synthesis. Where do they agree or "
+            "conflict? Which tension matters most, and what should the mind examine "
+            "next? 2-3 sentences."
+        )
+        try:
+            resp = await llm.ainvoke([{"role": "system", "content": prompt}])
+            synthesis = resp.content.strip()
+        except Exception:
+            synthesis = " ".join(p for p in (emo, logic, mem) if p).strip()
+        return {
+            "synthesis": synthesis,
+            "depth": state.get("depth", 0) + 1,
+        }
+
+    return synthesize
 
 
 def make_surface(llm: BaseChatModel, config: OuroborosConfig):
@@ -247,30 +288,62 @@ def make_breathe(config: OuroborosConfig):
     return breathe
 
 
-def make_research_agent(llm: BaseChatModel, config: OuroborosConfig):
-    from ouroboros.graph.tools import ALL_TOOLS
+def make_plan_research(llm: BaseChatModel, config: OuroborosConfig):
+    """Plan research: ask the LLM for a few focused sub-queries to investigate.
 
-    prompt_template = _get_prompt(config.mode, "research_prompt")
-    llm_with_tools = llm.bind_tools(ALL_TOOLS)
+    Produces ``pending_queries`` which ``fan_out_research`` turns into one parallel
+    worker per query via the LangGraph ``Send`` API (dynamic map-reduce).
+    """
 
-    async def research_agent(state: OuroborosState) -> dict:
-        prompt = prompt_template.format(
-            seed=state.get("seed", ""),
-            thought=state.get("thought", ""),
+    async def plan_research(state: OuroborosState) -> dict:
+        seed = state.get("seed", "")
+        thought = state.get("thought", "")
+        prompt = (
+            f'You are planning research to deepen introspection on: "{seed}"\n'
+            f'Current thought: "{thought}"\n\n'
+            "List 2-3 focused web-search queries that would surface new perspectives "
+            "or challenge an assumption. One query per line, no numbering or commentary."
         )
-        messages = [SystemMessage(content=prompt)] + state["messages"][-6:]
-        response = await llm_with_tools.ainvoke(messages)
-        queries = list(state.get("research_queries", []))
-        if hasattr(response, "tool_calls") and response.tool_calls:
-            for tc in response.tool_calls:
-                queries.append(tc.get("args", {}).get("query", str(tc)))
+        try:
+            resp = await llm.ainvoke([{"role": "system", "content": prompt}])
+            lines = [ln.strip("-•*0123456789. \t") for ln in resp.content.splitlines()]
+            queries = [ln for ln in lines if ln][:3]
+        except Exception:
+            queries = []
+        if not queries:
+            queries = [thought or seed or "introspection"]
         return {
-            "messages": [response],
-            "tick": state.get("tick", 0) + 1,
+            "pending_queries": queries,
             "research_queries": queries,
+            "tick": state.get("tick", 0) + 1,
         }
 
-    return research_agent
+    return plan_research
+
+
+def make_research_worker():
+    """One parallel research worker per sub-query (fanned out via Send)."""
+    from ouroboros.graph.tools import web_search
+
+    async def research_worker(state: dict) -> dict:
+        query = (state or {}).get("query", "")
+        try:
+            result = web_search.invoke({"query": query})
+        except Exception:
+            result = random.choice(FALLBACK_RESEARCH)
+        return {"research_findings": [f"{query} → {result}"[:300]]}
+
+    return research_worker
+
+
+def fan_out_research(state: OuroborosState):
+    """Dynamic fan-out: emit one Send per pending query, or skip to think."""
+    from langgraph.types import Send
+
+    queries = state.get("pending_queries", []) or []
+    if not queries:
+        return "think"
+    return [Send("research_worker", {"query": q}) for q in queries]
 
 
 def steer(state: OuroborosState) -> dict:
@@ -307,13 +380,6 @@ def make_route_after_synthesis(config: OuroborosConfig):
         return "think"
 
     return route_after_synthesis
-
-
-def should_use_tool(state: OuroborosState) -> str:
-    last_message = state["messages"][-1]
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        return "tools"
-    return "done"
 
 
 def make_route_after_breathe(config: OuroborosConfig):

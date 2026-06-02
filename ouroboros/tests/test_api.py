@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from fastapi.testclient import TestClient
 
@@ -72,3 +68,47 @@ class TestFrontend:
         r = client.get("/")
         assert r.status_code == 200
         assert "Ouroboros" in r.text
+
+
+class TestCorsOriginsParsing:
+    def test_wildcard_default(self):
+        from ouroboros.config import Settings
+
+        assert Settings(allowed_origins="*").cors_origins == ["*"]
+
+    def test_comma_separated(self):
+        from ouroboros.config import Settings
+
+        s = Settings(allowed_origins="https://a.com, https://b.com")
+        assert s.cors_origins == ["https://a.com", "https://b.com"]
+
+    def test_empty_falls_back_to_wildcard(self):
+        from ouroboros.config import Settings
+
+        assert Settings(allowed_origins="").cors_origins == ["*"]
+
+
+class TestDemoSafety:
+    def test_concurrent_session_limit_returns_429(self, client):
+        import ouroboros.server as srv
+
+        with patch.object(srv.settings, "max_concurrent_sessions", 1), \
+             patch.object(srv, "_running", {"already-running"}):
+            r = client.post("/api/start", params={"seed": "hi", "mode": "explore"})
+        assert r.status_code == 429
+
+    def test_demo_mode_clamps_cycles(self, client):
+        import ouroboros.server as srv
+
+        with patch.object(srv, "_run_graph", new=AsyncMock()), \
+             patch.object(srv, "_running", set()), \
+             patch.object(srv.settings, "demo_mode", True), \
+             patch.object(srv.settings, "max_demo_cycles", 3):
+            r = client.post(
+                "/api/start",
+                params={"seed": "hi", "mode": "explore"},
+                json={"max_loop_guard": 50},
+            )
+            assert r.status_code == 200
+            sid = r.json()["session_id"]
+            assert srv._sessions[sid]["config"].max_loop_guard == 3

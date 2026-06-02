@@ -35,19 +35,15 @@ def web_search(query: str) -> str:
 @tool
 def retrieve_memories(query: str, memories: list[str] | None = None) -> str:
     """Search through stored memories for connections to a query."""
+    from ouroboros.memory import semantic_search
+
     mems = memories or []
     if not mems:
         return "No memories stored yet."
-    query_words = set(query.lower().split())
-    scored = []
-    for m in mems:
-        mem_words = set(m.lower().split())
-        overlap = len(query_words & mem_words)
-        if overlap > 0:
-            scored.append((overlap, m))
-    if scored:
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return "Related memories: " + "; ".join(m for _, m in scored[:3])
+    results = semantic_search(query, mems, k=3)
+    related = [m for m, score in results if score > 0]
+    if related:
+        return "Related memories: " + "; ".join(related)
     return "No strongly connected memories. Recent: " + "; ".join(mems[-2:])
 
 

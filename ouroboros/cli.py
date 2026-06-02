@@ -5,22 +5,16 @@ import asyncio
 import json
 import sys
 import uuid
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 
-from ouroboros.config import get_settings
+from ouroboros.checkpointing import checkpointer_context
 from ouroboros.graph import create_ouroboros_graph
 from ouroboros.models import Mode, OuroborosConfig
 from ouroboros.presets import MODE_PRESETS
+from ouroboros.providers import get_llm as _get_llm
 from ouroboros.store import SessionStore
-
-
-def _get_llm(temperature: float = 0.7):
-    settings = get_settings()
-    if settings.llm_provider == "openai":
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=settings.openai_model, temperature=temperature)
-    from langchain_groq import ChatGroq
-    return ChatGroq(model=settings.groq_model, temperature=temperature)
+from ouroboros.usage import configure_tracing, new_usage_handler, summarize_usage
 
 
 def _read_stdin() -> str | None:
@@ -91,7 +85,7 @@ class QuietPrinter:
 
 class JSONPrinter:
     @staticmethod
-    def event(node, text, **kwargs):
+    def thought(node, text, **kwargs):
         return json.dumps({"node": node, "text": text, **kwargs})
 
     @staticmethod
@@ -120,11 +114,16 @@ async def run_session(
     db_path: str,
 ):
     printer = _get_printer(fmt)
+    configure_tracing()
+    usage_handler = new_usage_handler()
     llm = _get_llm(config.temperature)
-    cfg_steer = config.steer_interval
     if no_steer:
         config = config.model_copy(update={"steer_interval": 999})
-    graph = create_ouroboros_graph(llm, config)
+
+    # Open the (possibly durable) checkpointer for the lifetime of this session.
+    stack = AsyncExitStack()
+    checkpointer = await stack.enter_async_context(checkpointer_context())
+    graph = create_ouroboros_graph(llm, config, checkpointer=checkpointer)
 
     session_id = uuid.uuid4().hex[:12]
     store = SessionStore(db_path)
@@ -151,7 +150,10 @@ async def run_session(
         "human_input": "",
         "steer_count": 0,
     }
-    graph_config = {"configurable": {"thread_id": session_id}}
+    graph_config = {
+        "configurable": {"thread_id": session_id},
+        "callbacks": [usage_handler],
+    }
     all_insights = []
     stream_log = []
 
@@ -190,7 +192,7 @@ async def run_session(
             if bar:
                 print(bar, flush=True)
 
-            snapshot = graph.get_state(graph_config)
+            snapshot = await graph.aget_state(graph_config)
             if snapshot.next and "steer" in snapshot.next and not no_steer:
                 if fmt == "json":
                     print(json.dumps({"type": "waiting_for_input"}), flush=True)
@@ -210,7 +212,9 @@ async def run_session(
     except KeyboardInterrupt:
         pass
 
+    usage = summarize_usage(usage_handler)
     final_state = {k: v for k, v in state.items() if k != "messages"}
+    final_state["usage"] = usage
     store.save_session(session_id, {
         "id": session_id,
         "seed": seed,
@@ -226,14 +230,25 @@ async def run_session(
         for ins in all_insights:
             print(ins)
     elif fmt == "json":
-        print(json.dumps({"type": "done", "session_id": session_id, "insights": all_insights}))
+        print(json.dumps({
+            "type": "done",
+            "session_id": session_id,
+            "insights": all_insights,
+            "usage": usage,
+        }))
     else:
         print(f"\n{RichPrinter.DIM}─" * 50)
         print(f"{RichPrinter.BOLD}Session {session_id}{RichPrinter.RESET}")
         print(f"{RichPrinter.DIM}{len(all_insights)} insights surfaced, {state.get('tick', 0)} ticks{RichPrinter.RESET}")
+        print(
+            f"{RichPrinter.DIM}{usage['total_tokens']:,} tokens "
+            f"({usage['input_tokens']:,} in / {usage['output_tokens']:,} out) "
+            f"· est. ${usage['estimated_cost_usd']:.4f}{RichPrinter.RESET}"
+        )
         for i, ins in enumerate(all_insights, 1):
             print(f"  {RichPrinter.INSIGHT}{i}. {ins}{RichPrinter.RESET}")
 
+    await stack.aclose()
     return session_id
 
 
@@ -287,7 +302,7 @@ def cmd_export(args):
         return
 
     lines = [
-        f"# Ouroboros Session",
+        "# Ouroboros Session",
         f"**Seed:** {session['seed']}",
         f"**Mode:** {session['mode']}",
         f"**Date:** {session['created_at']}",
@@ -313,7 +328,17 @@ def cmd_delete(args):
     print(f"Session {args.session_id} deleted.")
 
 
+def _force_utf8_output():
+    """Ensure box-drawing/unicode output works on consoles defaulting to cp1252 (Windows)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main():
+    _force_utf8_output()
     parser = argparse.ArgumentParser(
         prog="ouroboros",
         description="Recursive Introspection Engine — autonomous multi-perspective reasoning",

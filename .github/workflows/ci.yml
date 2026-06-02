@@ -26,7 +26,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Lint
-        run: ruff check ouroboros/
+        run: ruff check ouroboros/ evals/
 
       - name: Test
         run: pytest ouroboros/tests/ -v

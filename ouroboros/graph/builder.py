@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 
 from ouroboros.graph.state import OuroborosState
@@ -10,20 +9,20 @@ from ouroboros.graph.nodes import (
     ingest,
     make_think,
     make_reflect,
-    emotional_analysis,
+    make_emotional_analysis,
     make_logical_analysis,
     memory_search,
-    synthesize,
+    make_synthesize,
     make_surface,
     remember,
     make_breathe,
-    make_research_agent,
+    make_plan_research,
+    make_research_worker,
+    fan_out_research,
     steer,
-    should_use_tool,
     make_route_after_synthesis,
     make_route_after_breathe,
 )
-from ouroboros.graph.tools import ALL_TOOLS
 from ouroboros.models import OuroborosConfig
 
 
@@ -36,11 +35,11 @@ def create_ouroboros_graph(
 
     Demonstrates these LangGraph patterns:
     - Fan-out / fan-in (parallel analysis: emotional, logical, memory → synthesize)
-    - ToolNode integration (research agent with web_search + retrieve_memories)
-    - Conditional routing (route_after_synthesis, route_after_breathe, should_use_tool)
+    - Send API map-reduce (plan_research → N parallel research_workers → reduce)
+    - Conditional routing (route_after_synthesis, route_after_breathe, fan_out_research)
     - Human-in-the-loop (interrupt_before=["steer"])
-    - Custom state reducers (extend_list for memories, insights, research queries)
-    - Checkpointing (MemorySaver or pluggable checkpointer)
+    - Custom state reducers (extend_list for memories, insights, research findings)
+    - Checkpointing (MemorySaver default, or durable AsyncSqliteSaver — pluggable)
     """
     if config is None:
         config = OuroborosConfig()
@@ -50,12 +49,12 @@ def create_ouroboros_graph(
     builder.add_node("ingest", ingest)
     builder.add_node("think", make_think(llm, config))
     builder.add_node("reflect", make_reflect(llm, config))
-    builder.add_node("emotional", lambda s: emotional_analysis(s, config))
+    builder.add_node("emotional", make_emotional_analysis(llm, config))
     builder.add_node("logical", make_logical_analysis(llm))
     builder.add_node("memory", memory_search)
-    builder.add_node("synthesize", synthesize)
-    builder.add_node("research_agent", make_research_agent(llm, config))
-    builder.add_node("execute_tool", ToolNode(ALL_TOOLS))
+    builder.add_node("synthesize", make_synthesize(llm))
+    builder.add_node("plan_research", make_plan_research(llm, config))
+    builder.add_node("research_worker", make_research_worker())
     builder.add_node("surface", make_surface(llm, config))
     builder.add_node("remember", lambda s: remember(s, config))
     builder.add_node("breathe", make_breathe(config))
@@ -77,15 +76,13 @@ def create_ouroboros_graph(
     builder.add_conditional_edges(
         "synthesize",
         make_route_after_synthesis(config),
-        {"think": "think", "research": "research_agent", "surface": "surface"},
+        {"think": "think", "research": "plan_research", "surface": "surface"},
     )
 
-    builder.add_conditional_edges(
-        "research_agent",
-        should_use_tool,
-        {"tools": "execute_tool", "done": "think"},
-    )
-    builder.add_edge("execute_tool", "research_agent")
+    # Send-based map-reduce: plan_research fans out to one worker per sub-query,
+    # workers reduce their findings into state, then control returns to think.
+    builder.add_conditional_edges("plan_research", fan_out_research, ["research_worker", "think"])
+    builder.add_edge("research_worker", "think")
 
     builder.add_edge("surface", "remember")
     builder.add_edge("remember", "breathe")

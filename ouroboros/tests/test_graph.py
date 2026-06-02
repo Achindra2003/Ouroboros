@@ -5,15 +5,18 @@ import pytest
 from ouroboros.graph.builder import create_ouroboros_graph
 from ouroboros.graph.nodes import (
     ingest,
-    emotional_analysis,
+    derive_mood,
+    make_emotional_analysis,
     memory_search,
-    synthesize,
+    make_synthesize,
+    make_plan_research,
+    make_research_worker,
+    fan_out_research,
     steer,
-    should_use_tool,
     make_route_after_synthesis,
     make_route_after_breathe,
 )
-from ouroboros.graph.state import OuroborosState, extend_list
+from ouroboros.graph.state import extend_list
 from ouroboros.models import Mode, OuroborosConfig
 
 
@@ -51,7 +54,7 @@ class TestGraphCreation:
         node_names = set(graph.nodes.keys())
         expected = {
             "ingest", "think", "reflect", "emotional", "logical",
-            "memory", "synthesize", "research_agent", "execute_tool",
+            "memory", "synthesize", "plan_research", "research_worker",
             "surface", "remember", "breathe", "steer",
         }
         assert expected.issubset(node_names)
@@ -80,17 +83,35 @@ class TestNodeFunctions:
         result = await reflect(base_state)
         assert "messages" in result
 
-    def test_emotional_analysis_with_keyword(self, base_state, default_config):
-        base_state["thought"] = "I feel fear and uncertainty about this"
-        result = emotional_analysis(base_state, default_config)
-        assert result["mood"] == "anxious"
-        assert "anxious" in result["emotional_reading"]
+    def test_derive_mood_with_keyword(self, default_config):
+        assert derive_mood("I feel fear and uncertainty about this", "curious", default_config) == "anxious"
 
-    def test_emotional_analysis_no_keyword(self, base_state, default_config):
+    def test_derive_mood_no_keyword_no_shift(self):
         config = OuroborosConfig(mood_shift_chance=0)
-        base_state["thought"] = "The weather is nice today"
-        result = emotional_analysis(base_state, config)
-        assert result["mood"] == "curious"
+        assert derive_mood("The weather is nice today", "curious", config) == "curious"
+
+    @pytest.mark.asyncio
+    async def test_emotional_analysis_node_uses_llm_and_derives_mood(
+        self, mock_llm, default_config, base_state
+    ):
+        node = make_emotional_analysis(mock_llm, default_config)
+        base_state["thought"] = "I feel fear and uncertainty"
+        result = await node(base_state)
+        assert result["mood"] == "anxious"  # keyword prior still drives routing
+        assert result["emotional_reading"]  # richer reading comes from the LLM
+
+    @pytest.mark.asyncio
+    async def test_emotional_analysis_node_falls_back_on_error(
+        self, mock_llm, default_config, base_state
+    ):
+        from unittest.mock import AsyncMock
+
+        mock_llm.ainvoke = AsyncMock(side_effect=RuntimeError("rate limited"))
+        node = make_emotional_analysis(mock_llm, default_config)
+        base_state["thought"] = "peace and acceptance"
+        result = await node(base_state)
+        assert result["mood"] == "serene"
+        assert "serene" in result["emotional_reading"]
 
     def test_memory_search_with_related(self, base_state):
         base_state["memories"] = [
@@ -106,12 +127,28 @@ class TestNodeFunctions:
         result = memory_search(base_state)
         assert "unanchored" in result["memory_reading"]
 
-    def test_synthesize(self, base_state):
+    @pytest.mark.asyncio
+    async def test_synthesize_integrates_via_llm(self, mock_llm, base_state):
+        node = make_synthesize(mock_llm)
         base_state["emotional_reading"] = "Mood: curious"
         base_state["logical_reading"] = "Logic: sound"
         base_state["memory_reading"] = "Memory: connected"
-        result = synthesize(base_state)
-        assert "curious" in result["synthesis"]
+        result = await node(base_state)
+        assert result["synthesis"]  # integrated reading from the LLM
+        assert result["depth"] == 1
+
+    @pytest.mark.asyncio
+    async def test_synthesize_fallback_concatenates_on_error(self, mock_llm, base_state):
+        from unittest.mock import AsyncMock
+
+        mock_llm.ainvoke = AsyncMock(side_effect=RuntimeError("boom"))
+        node = make_synthesize(mock_llm)
+        base_state["emotional_reading"] = "EMO"
+        base_state["logical_reading"] = "LOG"
+        base_state["memory_reading"] = "MEM"
+        result = await node(base_state)
+        assert "EMO" in result["synthesis"]
+        assert "LOG" in result["synthesis"]
         assert result["depth"] == 1
 
     @pytest.mark.asyncio
@@ -121,6 +158,42 @@ class TestNodeFunctions:
         result = await surface(base_state)
         assert "surfaced_insight" in result
         assert "insights" in result
+
+    @pytest.mark.asyncio
+    async def test_plan_research_produces_queries(self, mock_llm, default_config, base_state):
+        node = make_plan_research(mock_llm, default_config)
+        result = await node(base_state)
+        assert result["pending_queries"], "should plan at least one query"
+        assert result["research_queries"] == result["pending_queries"]
+
+    @pytest.mark.asyncio
+    async def test_plan_research_falls_back_on_llm_error(self, mock_llm, default_config, base_state):
+        # Free-tier rate limits / network errors must not crash the graph.
+        from unittest.mock import AsyncMock
+
+        mock_llm.ainvoke = AsyncMock(side_effect=RuntimeError("429 rate limited"))
+        node = make_plan_research(mock_llm, default_config)
+        result = await node(base_state)
+        assert result["pending_queries"], "fallback must still yield a query"
+
+    @pytest.mark.asyncio
+    async def test_research_worker_returns_finding(self):
+        node = make_research_worker()
+        result = await node({"query": "what is recursion"})
+        assert result["research_findings"]
+        assert "what is recursion" in result["research_findings"][0]
+
+    def test_fan_out_research_emits_sends(self, base_state):
+        from langgraph.types import Send
+
+        base_state["pending_queries"] = ["q1", "q2", "q3"]
+        sends = fan_out_research(base_state)
+        assert isinstance(sends, list) and len(sends) == 3
+        assert all(isinstance(s, Send) and s.node == "research_worker" for s in sends)
+
+    def test_fan_out_research_skips_to_think_when_empty(self, base_state):
+        base_state["pending_queries"] = []
+        assert fan_out_research(base_state) == "think"
 
     def test_steer_with_input(self, base_state):
         base_state["human_input"] = "Dig deeper into recursion"
@@ -135,11 +208,16 @@ class TestNodeFunctions:
 
 class TestRouting:
     def test_route_after_synthesis_continue(self, base_state, default_config):
+        # The router has a stochastic ~20% branch to "research"; pin the RNG above
+        # that threshold so this test deterministically exercises the "think" path.
+        from unittest.mock import patch
+
         router = make_route_after_synthesis(default_config)
         base_state["energy"] = 80
         base_state["depth"] = 1
         base_state["loop_guard"] = 0
-        assert router(base_state) == "think"
+        with patch("ouroboros.graph.nodes.random.random", return_value=0.99):
+            assert router(base_state) == "think"
 
     def test_route_after_synthesis_surface_low_energy(self, base_state, default_config):
         router = make_route_after_synthesis(default_config)
@@ -158,18 +236,6 @@ class TestRouting:
         base_state["depth"] = 3
         base_state["mood"] = "serene"
         assert router(base_state) == "surface"
-
-    def test_should_use_tool_with_tool_calls(self, base_state):
-        from langchain_core.messages import AIMessage
-        msg = AIMessage(content="", tool_calls=[{"name": "web_search", "args": {"query": "test"}, "id": "1"}])
-        base_state["messages"] = [msg]
-        assert should_use_tool(base_state) == "tools"
-
-    def test_should_use_tool_without_tool_calls(self, base_state):
-        from langchain_core.messages import AIMessage
-        msg = AIMessage(content="No tools needed")
-        base_state["messages"] = [msg]
-        assert should_use_tool(base_state) == "done"
 
     def test_route_after_breathe_continue(self, base_state, default_config):
         router = make_route_after_breathe(default_config)

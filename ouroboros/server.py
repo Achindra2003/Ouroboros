@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,16 +12,24 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-
+from ouroboros.config import get_settings
 from ouroboros.graph import create_ouroboros_graph
-from ouroboros.models import Mode, OuroborosConfig, SessionMeta
+from ouroboros.models import Mode
 from ouroboros.presets import MODE_PRESETS
+from ouroboros.providers import get_llm as _get_llm
 from ouroboros.store import SessionStore
+from ouroboros.usage import configure_tracing, new_usage_handler, summarize_usage
 
-app = FastAPI(title="Ouroboros", version="2.0.0", description="Recursive Introspection Engine")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+configure_tracing()
+settings = get_settings()
+
+app = FastAPI(title="Ouroboros", version="2.1.0", description="Recursive Introspection Engine")
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -36,21 +43,7 @@ _graph_tasks: dict[str, asyncio.Task] = {}
 _graphs: dict[str, object] = {}
 _running: set[str] = set()
 _waiting_for_input: set[str] = set()
-
-
-def _get_llm(temperature: float = 0.7):
-    provider = os.environ.get("LLM_PROVIDER", "groq")
-    if provider == "openai":
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-            temperature=temperature,
-        )
-    from langchain_groq import ChatGroq
-    return ChatGroq(
-        model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
-        temperature=temperature,
-    )
+_usage_handlers: dict[str, object] = {}
 
 
 def _serialize_step(session_id: str, node: str, session: dict) -> dict:
@@ -92,6 +85,59 @@ async def _broadcast(data: dict):
         _ws_clients.discard(ws)
 
 
+async def _stream_graph(session_id: str, session: dict, graph, graph_config: dict, inputs):
+    """Drive the graph, streaming LLM tokens live and per-node state updates.
+
+    Uses LangGraph multi-mode streaming: ``messages`` yields token chunks (so the
+    UI can type thoughts out as the model produces them) and ``updates`` yields
+    the post-node state delta (so the graph node lights up and readings refresh).
+    """
+    try:
+        async for mode, data in graph.astream(
+            inputs, config=graph_config, stream_mode=["updates", "messages"]
+        ):
+            if session_id not in _running:
+                break
+
+            if mode == "messages":
+                chunk, meta = data
+                text = getattr(chunk, "content", "") or ""
+                if text:
+                    await _broadcast({
+                        "type": "token",
+                        "session_id": session_id,
+                        "node": meta.get("langgraph_node", ""),
+                        "text": text,
+                    })
+                continue
+
+            # mode == "updates": {node_name: state_delta}
+            node_name = next(iter(data))
+            update = data[node_name]
+            for key, val in update.items():
+                if key == "messages":
+                    for msg in val:
+                        if hasattr(msg, "content"):
+                            session["stream"].append({"node": node_name, "text": msg.content})
+                else:
+                    session["state"][key] = val
+            try:
+                await _broadcast(_serialize_step(session_id, node_name, session))
+            except Exception:
+                pass
+            # Small beat so the node-by-node graph animation stays watchable.
+            await asyncio.sleep(0.15)
+
+        state_snapshot = await graph.aget_state(graph_config)
+        if state_snapshot.next and "steer" in state_snapshot.next:
+            _waiting_for_input.add(session_id)
+            await _broadcast({"type": "waiting_for_input", "session_id": session_id})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await _broadcast({"type": "error", "session_id": session_id, "message": str(e)})
+
+
 async def _run_graph(session_id: str):
     session = _sessions.get(session_id)
     if not session:
@@ -127,53 +173,28 @@ async def _run_graph(session_id: str):
         "steer_count": 0,
     }
     session["stream"] = []
-    graph_config = {"configurable": {"thread_id": session_id}}
+    usage_handler = new_usage_handler()
+    _usage_handlers[session_id] = usage_handler
+    graph_config = {
+        "configurable": {"thread_id": session_id},
+        "callbacks": [usage_handler],
+    }
 
-    try:
-        async for event in graph.astream(
-            session["state"], config=graph_config, stream_mode="updates"
-        ):
-            if session_id not in _running:
-                break
-            node_name = list(event.keys())[0]
-            update = event[node_name]
-            for key, val in update.items():
-                if key == "messages":
-                    for msg in val:
-                        if hasattr(msg, "content"):
-                            session["stream"].append(
-                                {"node": node_name, "text": msg.content}
-                            )
-                else:
-                    session["state"][key] = val
-            try:
-                await _broadcast(_serialize_step(session_id, node_name, session))
-            except Exception:
-                pass
-            await asyncio.sleep(0.3)
-
-        state_snapshot = graph.get_state(graph_config)
-        if state_snapshot.next and "steer" in state_snapshot.next:
-            _waiting_for_input.add(session_id)
-            await _broadcast(
-                {"type": "waiting_for_input", "session_id": session_id}
-            )
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        await _broadcast(
-            {"type": "error", "session_id": session_id, "message": str(e)}
-        )
+    await _stream_graph(session_id, session, graph, graph_config, session["state"])
 
     if session_id in _running:
         _running.discard(session_id)
+    usage = summarize_usage(_usage_handlers.get(session_id) or new_usage_handler())
+    session["state"]["usage"] = usage
     session["ended_at"] = datetime.now(timezone.utc).isoformat()
     store.save_session(session_id, {
-        **session,
+        **{k: v for k, v in session.items() if k != "usage_handler"},
         "mode": config.mode.value,
         "config": config.model_dump(),
     })
-    await _broadcast({"type": "complete", "session_id": session_id, "running": False})
+    await _broadcast({
+        "type": "complete", "session_id": session_id, "running": False, "usage": usage,
+    })
 
 
 async def _resume_graph(session_id: str, human_input: str):
@@ -187,54 +208,29 @@ async def _resume_graph(session_id: str, human_input: str):
     if not session or not graph:
         return
 
-    graph_config = {"configurable": {"thread_id": session_id}}
+    usage_handler = _usage_handlers.get(session_id) or new_usage_handler()
+    _usage_handlers[session_id] = usage_handler
+    graph_config = {
+        "configurable": {"thread_id": session_id},
+        "callbacks": [usage_handler],
+    }
     session["state"]["human_input"] = human_input
 
-    try:
-        async for event in graph.astream(
-            None, config=graph_config, stream_mode="updates"
-        ):
-            if session_id not in _running:
-                break
-            node_name = list(event.keys())[0]
-            update = event[node_name]
-            for key, val in update.items():
-                if key == "messages":
-                    for msg in val:
-                        if hasattr(msg, "content"):
-                            session["stream"].append(
-                                {"node": node_name, "text": msg.content}
-                            )
-                else:
-                    session["state"][key] = val
-            try:
-                await _broadcast(_serialize_step(session_id, node_name, session))
-            except Exception:
-                pass
-            await asyncio.sleep(0.3)
-
-        state_snapshot = graph.get_state(graph_config)
-        if state_snapshot.next and "steer" in state_snapshot.next:
-            _waiting_for_input.add(session_id)
-            await _broadcast(
-                {"type": "waiting_for_input", "session_id": session_id}
-            )
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        await _broadcast(
-            {"type": "error", "session_id": session_id, "message": str(e)}
-        )
+    await _stream_graph(session_id, session, graph, graph_config, None)
 
     if session_id in _running:
         _running.discard(session_id)
+    usage = summarize_usage(_usage_handlers.get(session_id) or new_usage_handler())
+    session["state"]["usage"] = usage
     session["ended_at"] = datetime.now(timezone.utc).isoformat()
     store.save_session(session_id, {
-        **session,
+        **{k: v for k, v in session.items() if k != "usage_handler"},
         "mode": session["config"].mode.value,
         "config": session["config"].model_dump(),
     })
-    await _broadcast({"type": "complete", "session_id": session_id, "running": False})
+    await _broadcast({
+        "type": "complete", "session_id": session_id, "running": False, "usage": usage,
+    })
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -261,9 +257,20 @@ async def get_modes():
 
 @app.post("/api/start")
 async def start_run(seed: str = "What am I?", mode: str = "explore", config: dict = None):
+    if len(_running) >= settings.max_concurrent_sessions:
+        return JSONResponse(
+            status_code=429,
+            content={"error": "server busy: too many concurrent sessions, try again shortly"},
+        )
+
     mode_enum = Mode(mode) if mode in [m.value for m in Mode] else Mode.EXPLORE
     preset = MODE_PRESETS[mode_enum]
-    cfg = preset["config"].model_copy(update=config or {})
+    overrides = dict(config or {})
+    if settings.demo_mode:
+        # Clamp untrusted public input to keep free-tier usage bounded.
+        requested = overrides.get("max_loop_guard", preset["config"].max_loop_guard)
+        overrides["max_loop_guard"] = min(requested, settings.max_demo_cycles)
+    cfg = preset["config"].model_copy(update=overrides)
 
     session_id = uuid.uuid4().hex[:12]
     _sessions[session_id] = {
@@ -362,7 +369,7 @@ async def export_session(session_id: str, format: str = "json"):
 
     if format == "markdown":
         lines = [
-            f"# Ouroboros Session",
+            "# Ouroboros Session",
             f"**Seed:** {session.get('seed', '')}",
             f"**Mode:** {session.get('mode', '')}",
             f"**Date:** {session.get('created_at', '')}",

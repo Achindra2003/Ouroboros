@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from ouroboros.cli import main, cmd_sessions, cmd_export, cmd_delete, _get_printer, RichPrinter, QuietPrinter, JSONPrinter
 
@@ -42,12 +38,20 @@ class TestPrinters:
         p = QuietPrinter()
         assert p.state_bar() is None
 
-    def test_json_printer_event(self):
+    def test_json_printer_thought(self):
+        # Must match the interface the CLI actually calls (printer.thought),
+        # shared by RichPrinter and QuietPrinter.
         p = JSONPrinter()
-        result = p.event("think", "text", mood="curious")
+        result = p.thought("think", "text", mood="curious")
         data = __import__("json").loads(result)
         assert data["node"] == "think"
         assert data["mood"] == "curious"
+
+    def test_all_printers_share_thought_interface(self):
+        for p in (RichPrinter(), QuietPrinter(), JSONPrinter()):
+            assert hasattr(p, "thought")
+            assert hasattr(p, "insight")
+            assert hasattr(p, "state_bar")
 
     def test_json_printer_insight(self):
         p = JSONPrinter()
@@ -89,7 +93,6 @@ class TestCLICommands:
 
     def test_delete_session(self, capsys, tmp_path):
         db = str(tmp_path / "test.db")
-        from ouroboros.cli import cmd_delete
         args = MagicMock(session_id="nonexistent", db=db)
         cmd_delete(args)
         captured = capsys.readouterr()
@@ -120,7 +123,7 @@ class TestCLIMain:
             return
             yield
 
-        with patch("ouroboros.cli._get_llm") as mock_llm, \
+        with patch("ouroboros.cli._get_llm"), \
              patch("ouroboros.cli.create_ouroboros_graph", return_value=mock_graph), \
              patch("ouroboros.cli.SessionStore") as mock_store, \
              patch("sys.argv", ["ouroboros", "run", "test seed", "--no-steer", "--format", "quiet", "--db", db]):

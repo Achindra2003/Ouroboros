@@ -4,16 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "2.0.0"
+version = "2.1.0"
 description = "Recursive Introspection Engine — autonomous multi-perspective reasoning with LangGraph"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-requires-dist = ["setuptools>=68.0"]
-
-[project.scripts]
-ouroboros = "ouroboros.cli:main"
-
 dependencies = [
     "langgraph>=0.2.0",
     "langchain>=0.3.0",
@@ -29,12 +24,23 @@ dependencies = [
     "websockets>=12.0",
 ]
 
+[project.scripts]
+ouroboros = "ouroboros.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
 search = ["tavily-python>=0.5"]
+local = ["langchain-ollama>=0.2"]
+memory = ["sentence-transformers>=3.0"]
+eval = ["matplotlib>=3.7"]
+persist = ["langgraph-checkpoint-sqlite>=2.0"]
 
 [tool.setuptools.packages.find]
 include = ["ouroboros*"]
+exclude = ["ouroboros.tests*"]
+
+[tool.setuptools.package-data]
+ouroboros = ["static/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

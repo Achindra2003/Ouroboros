@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from operator import add
 from typing import Annotated
 
 from langchain_core.messages import BaseMessage
@@ -37,5 +36,6 @@ class OuroborosState(TypedDict):
     mode: str
     research_queries: Annotated[list[str], extend_list]
     research_findings: Annotated[list[str], extend_list]
+    pending_queries: list[str]  # current batch to fan out (replace semantics)
     human_input: str
     steer_count: int
