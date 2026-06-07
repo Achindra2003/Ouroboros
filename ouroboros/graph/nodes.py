@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import re
 
 from langchain_core.messages import AIMessage
 from langchain_core.language_models import BaseChatModel
@@ -207,12 +208,35 @@ def memory_search(state: OuroborosState) -> dict:
     return {"memory_reading": reading}
 
 
-def make_synthesize(llm: BaseChatModel):
+_CONFIDENCE_RE = re.compile(r"confidence\s*[:=]\s*([01](?:\.\d+)?|\.\d+)", re.IGNORECASE)
+
+
+def _parse_confidence(text: str) -> tuple[str, float]:
+    """Split a trailing ``CONFIDENCE: <0-1>`` marker off an answer.
+
+    Returns ``(answer_without_marker, confidence)``; defaults to 0.5 when the
+    model omits or mangles the marker.
+    """
+    match = _CONFIDENCE_RE.search(text)
+    if not match:
+        return text.strip(), 0.5
+    conf = max(0.0, min(1.0, float(match.group(1))))
+    answer = _CONFIDENCE_RE.sub("", text).strip().rstrip("\n").strip()
+    return answer, conf
+
+
+def make_synthesize(llm: BaseChatModel, config: OuroborosConfig | None = None):
+    adaptive = bool(config and config.adaptive)
+
     async def synthesize(state: OuroborosState) -> dict:
         emo = state.get("emotional_reading", "")
         logic = state.get("logical_reading", "")
         mem = state.get("memory_reading", "")
         thought = state.get("thought", "")
+
+        if adaptive:
+            return await _synthesize_adaptive(llm, config, state, emo, logic, mem)
+
         prompt = (
             f'Three perspectives have examined the thought:\n"{thought}"\n\n'
             f"- Emotional: {emo}\n"
@@ -235,10 +259,75 @@ def make_synthesize(llm: BaseChatModel):
     return synthesize
 
 
+async def _synthesize_adaptive(
+    llm: BaseChatModel,
+    config: OuroborosConfig,
+    state: OuroborosState,
+    emo: str,
+    logic: str,
+    mem: str,
+) -> dict:
+    """Convergent self-refine: improve the *current best answer to the seed*,
+    anchored so it cannot drift, then measure convergence and let the controller
+    decide whether to halt. Fixes the divergence/drift that made the legacy loop
+    lose to single-shot, and produces the metacognitive signals."""
+    from ouroboros.graph.controller import answer_stability, decide
+
+    seed = state.get("seed", "")
+    prev = state.get("synthesis", "")
+    prompt = (
+        f'You are refining an answer to this exact question:\n"{seed}"\n\n'
+        f"Current best answer:\n{prev or '(none yet — write the first answer)'}\n\n"
+        "Three perspectives just examined the latest thinking:\n"
+        f"- Emotional: {emo}\n- Logical: {logic}\n- Memory: {mem}\n\n"
+        "Critique the current answer in light of these, then write an IMPROVED, "
+        "complete, self-contained answer to the question above. Stay strictly on "
+        "that question; be concrete and non-obvious; 2-4 sentences. Do not describe "
+        "your process. Finally, on a new line, rate how settled your answer now is "
+        'as "CONFIDENCE: <0.0-1.0>".'
+    )
+    try:
+        resp = await llm.ainvoke([{"role": "system", "content": prompt}])
+        answer, confidence = _parse_confidence(resp.content.strip())
+    except Exception:
+        answer = prev or " ".join(p for p in (emo, logic, mem) if p).strip()
+        confidence = 0.5
+
+    stability = answer_stability(prev, answer)
+    new_depth = state.get("depth", 0) + 1
+    decision = decide(
+        depth=new_depth, stability=stability, confidence=confidence, config=config
+    )
+    return {
+        "synthesis": answer,
+        "prev_synthesis": prev,
+        "confidence": confidence,
+        "stability": stability,
+        "should_halt": decision.halt,
+        "stop_reason": decision.reason,
+        "depth": new_depth,
+        # Feed the refined answer forward so the next cycle's think/critique is
+        # anchored to it (not to a drifting free-association).
+        "messages": [AIMessage(content=answer)],
+    }
+
+
 def make_surface(llm: BaseChatModel, config: OuroborosConfig):
     prompt_template = _get_prompt(config.mode, "surface_prompt")
+    adaptive = bool(config and config.adaptive)
 
     async def surface(state: OuroborosState) -> dict:
+        # Adaptive mode: the converged synthesis *is* the answer. Surface it as-is
+        # (full, complete, anchored) rather than re-generating a compressed
+        # aphorism — this is the output-parity fix for a fair comparison.
+        if adaptive:
+            answer = state.get("synthesis", "") or state.get("thought", "")
+            return {
+                "surfaced_insight": answer,
+                "messages": [AIMessage(content=f"[answer] {answer}")],
+                "insights": [answer],
+            }
+
         prompt = prompt_template.format(
             depth=state.get("depth", 1),
             seed=state.get("seed", ""),
@@ -361,6 +450,18 @@ def steer(state: OuroborosState) -> dict:
 
 def make_route_after_synthesis(config: OuroborosConfig):
     def route_after_synthesis(state: OuroborosState) -> str:
+        # Adaptive mode: the metacognitive controller already decided in synthesize
+        # (stored on state). Honour it; allow one research detour for grounded modes
+        # before convergence.
+        if config.adaptive:
+            if state.get("should_halt"):
+                return "surface"
+            mode = state.get("mode", "explore")
+            research_done = len(state.get("research_queries", []))
+            if mode in ("analyze", "solve") and research_done == 0 and state.get("depth", 0) >= 1:
+                return "research"
+            return "think"
+
         energy = state.get("energy", config.starting_energy)
         depth = state.get("depth", 0)
         guard = state.get("loop_guard", 0)
@@ -384,6 +485,11 @@ def make_route_after_synthesis(config: OuroborosConfig):
 
 def make_route_after_breathe(config: OuroborosConfig):
     def route_after_breathe(state: OuroborosState) -> str:
+        # Adaptive mode produces one converged answer per run; the compute budget
+        # is enforced inside the refine loop, so end once we've surfaced.
+        if config.adaptive:
+            return "__end__"
+
         energy = state.get("energy", config.starting_energy)
         guard = state.get("loop_guard", 0)
         steer_count = state.get("steer_count", 0)

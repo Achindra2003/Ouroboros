@@ -39,3 +39,10 @@ class OuroborosState(TypedDict):
     pending_queries: list[str]  # current batch to fan out (replace semantics)
     human_input: str
     steer_count: int
+    # --- metacognitive adaptive controller (Wedge A); populated only when
+    # config.adaptive is on. All replace-semantics, written solely by synthesize.
+    prev_synthesis: str  # previous cycle's answer, for stability measurement
+    confidence: float  # synthesizer's self-reported settledness (0-1)
+    stability: float  # cosine similarity between this and the previous answer
+    should_halt: bool  # controller's halt decision (read by the router)
+    stop_reason: str  # why the controller halted (converged | budget | ...)

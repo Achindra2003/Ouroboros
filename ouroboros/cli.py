@@ -272,6 +272,10 @@ def cmd_run(args):
         overrides["starting_energy"] = args.energy
     if args.max_cycles:
         overrides["max_loop_guard"] = args.max_cycles
+    if args.adaptive:
+        overrides["adaptive"] = True
+        if args.max_cycles:
+            overrides["compute_budget"] = args.max_cycles
     config = preset["config"].model_copy(update=overrides)
 
     asyncio.run(run_session(seed, mode, config, args.no_steer, args.format, args.db))
@@ -352,6 +356,7 @@ def main():
     run_p.add_argument("--energy", "-e", type=int, help="Starting energy override")
     run_p.add_argument("--max-cycles", type=int, help="Max loop cycles override")
     run_p.add_argument("--no-steer", action="store_true", help="Disable human steering (fully autonomous)")
+    run_p.add_argument("--adaptive", action="store_true", help="Metacognitive controller: convergent self-refine with content-aware halting (adaptive compute)")
     run_p.add_argument("--format", "-f", choices=["rich", "quiet", "json"], default="rich", help="Output format")
     run_p.add_argument("--db", default="ouroboros_sessions.db", help="Session database path")
 

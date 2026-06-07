@@ -25,3 +25,6 @@ Thumbs.db
 # Temp
 .pytest_cache/
 .mypy_cache/
+
+# Eval run logs (transient; results.json is kept as provenance)
+*.log

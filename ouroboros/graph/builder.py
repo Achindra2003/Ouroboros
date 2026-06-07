@@ -52,7 +52,7 @@ def create_ouroboros_graph(
     builder.add_node("emotional", make_emotional_analysis(llm, config))
     builder.add_node("logical", make_logical_analysis(llm))
     builder.add_node("memory", memory_search)
-    builder.add_node("synthesize", make_synthesize(llm))
+    builder.add_node("synthesize", make_synthesize(llm, config))
     builder.add_node("plan_research", make_plan_research(llm, config))
     builder.add_node("research_worker", make_research_worker())
     builder.add_node("surface", make_surface(llm, config))

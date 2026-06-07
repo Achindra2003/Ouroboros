@@ -35,6 +35,17 @@ class OuroborosConfig(BaseModel):
     steer_interval: int = Field(default=3, ge=1, le=10)
     temperature: float = Field(default=0.7, ge=0, le=2)
 
+    # --- Metacognitive adaptive controller (Wedge A) ---
+    # When enabled, the loop becomes a convergent self-refine cycle whose halting
+    # is decided by content-aware signals (answer stability + self-confidence)
+    # under a compute budget, instead of fixed depth / random routing. Off by
+    # default so the legacy engine and existing tests are unchanged.
+    adaptive: bool = False
+    compute_budget: int = Field(default=6, ge=1, le=30)  # hard cap on refine cycles
+    min_cycles: int = Field(default=1, ge=1, le=10)  # always refine at least this many
+    stability_threshold: float = Field(default=0.92, ge=0, le=1)  # cosine → converged
+    confidence_threshold: float = Field(default=0.75, ge=0, le=1)  # self-reported settle
+
 
 class SessionMeta(BaseModel):
     id: str
